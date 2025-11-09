@@ -1,4 +1,4 @@
 # matrix
-Matrix-style screensaver, written in C. 
+Matrix-style screensaver, written in C. MIT license.
 
-![Screenshot](screenshot.PNG) 
+![Screenshot](screenshot.png) 
