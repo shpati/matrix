@@ -13,7 +13,7 @@
 #define LETTER_CYCLE_MIN 5
 #define LETTER_CYCLE_MAX 10
 #define BURST_CHANCE     50
-#define FRAME_INTERVAL   20   // ms per frame 
+#define FRAME_INTERVAL   40   // ms per frame 
 // ======================================
 
 typedef struct {
@@ -25,6 +25,15 @@ typedef struct {
     int burst;
     WCHAR chars[MAX_TRAIL];
 } Drop;
+
+typedef struct {
+    HDC hdc, memdc;
+    HBITMAP bmp;
+    HGDIOBJ oldbmp;
+    HFONT hFont;
+    Drop drops[MAX_COLS];
+    int ncols, width, height;
+} MATRIXSTATE;
 
 static Drop drops[MAX_COLS];
 static int ncols, width, height;
@@ -52,29 +61,24 @@ void init_drops(HWND hwnd) {
         drops[i].y = (float)rnd(-height * 2, height * 2);
         drops[i].speed = (float)rnd(FALL_SPEED_MIN, FALL_SPEED_MAX);
         drops[i].trail = rnd(TRAIL_LEN_MIN, TRAIL_LEN_MAX);
-        // Tie letter cycling to fall speed
         float t = (drops[i].speed - FALL_SPEED_MIN) / (float)(FALL_SPEED_MAX - FALL_SPEED_MIN);
         drops[i].refreshDelay = (int)(LETTER_CYCLE_MAX - t * (LETTER_CYCLE_MAX - LETTER_CYCLE_MIN));
         drops[i].refreshCounter = rnd(0, drops[i].refreshDelay);
         drops[i].burst = (rand() % BURST_CHANCE == 0);
 
         for (int j = 0; j < MAX_TRAIL; j++)
-            drops[i].chars[j] = charset[rand() %
-                (sizeof(charset) / sizeof(WCHAR) - 1)];
+            drops[i].chars[j] = charset[rand() % (sizeof(charset) / sizeof(WCHAR) - 1)];
     }
 }
 
 void draw_frame(HDC memdc) {
-    // Clear backbuffer (single fill; very fast)
     RECT r = { 0, 0, width, height };
     FillRect(memdc, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
-
     SetBkMode(memdc, TRANSPARENT);
 
     for (int i = 0; i < ncols; i++) {
         Drop *d = &drops[i];
 
-        // Update letter cycling (only occasionally)
         if (--d->refreshCounter <= 0) {
             int visible = d->trail < MAX_TRAIL ? d->trail : MAX_TRAIL;
             for (int j = 0; j < visible; j++)
@@ -82,7 +86,6 @@ void draw_frame(HDC memdc) {
             d->refreshCounter = d->refreshDelay;
         }
 
-        // Draw trail from head (0) downward
         for (int j = 0; j < d->trail; j++) {
             int yy = (int)(d->y - j * colH);
             if (yy < -colH || yy >= height) continue;
@@ -99,10 +102,8 @@ void draw_frame(HDC memdc) {
             TextOutW(memdc, (int)d->x, yy, &d->chars[j], 1);
         }
 
-        // Move column down
         d->y += d->speed;
 
-        // Reset only when *entire* trail is off-screen
         if (d->y - d->trail * colH > height) {
             d->y = (float)rnd(-height * 0.25f, 0);
             d->trail = rnd(TRAIL_LEN_MIN, TRAIL_LEN_MAX);
@@ -111,68 +112,82 @@ void draw_frame(HDC memdc) {
     }
 }
 
-
 LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
-    static HDC hdc = NULL, memdc = NULL;
-    static HBITMAP bmp = NULL;
-    static HGDIOBJ oldbmp = NULL;
-    static HBRUSH bg = NULL;
-    static int lastMouseX = -1;
-    static int lastMouseY = -1;
+    static int lastMouseX = -1, lastMouseY = -1;
 
     switch (msg) {
     case WM_CREATE: {
         ShowCursor(FALSE);
-        hdc = GetDC(w);
-        RECT r; GetClientRect(w, &r);
-        width = r.right; height = r.bottom;
 
-        hFont = CreateFontW(
+        MATRIXSTATE *st = (MATRIXSTATE*)calloc(1, sizeof(MATRIXSTATE));
+        SetWindowLongPtr(w, GWLP_USERDATA, (LONG_PTR)st);
+
+        st->hdc = GetDC(w);
+        RECT r; GetClientRect(w, &r);
+        st->width = r.right; st->height = r.bottom;
+
+        st->hFont = CreateFontW(
             colH, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             SHIFTJIS_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, FIXED_PITCH, L"Consolas"
         );
 
-        bmp = CreateCompatibleBitmap(hdc, width, height);
-        memdc = CreateCompatibleDC(hdc);
-        oldbmp = SelectObject(memdc, bmp);
-        bg = CreateSolidBrush(RGB(0, 0, 0));
+        st->bmp = CreateCompatibleBitmap(st->hdc, st->width, st->height);
+        st->memdc = CreateCompatibleDC(st->hdc);
+        st->oldbmp = SelectObject(st->memdc, st->bmp);
+        SelectObject(st->memdc, st->hFont);
 
-        SelectObject(memdc, hFont);
         SIZE s;
-        GetTextExtentPoint32W(memdc, L"W", 1, &s);
+        GetTextExtentPoint32W(st->memdc, L"W", 1, &s);
         if (s.cx > 4 && s.cy > 4) { colW = s.cx; colH = s.cy; }
 
+        RECT full = { 0, 0, st->width, st->height };
+        FillRect(st->memdc, &full, (HBRUSH)GetStockObject(BLACK_BRUSH));
+
+        width = st->width;
+        height = st->height;
         init_drops(w);
+        memcpy(st->drops, drops, sizeof(drops));
+
         SetTimer(w, 1, FRAME_INTERVAL, NULL);
         return 0;
     }
 
-    case WM_TIMER:
-        draw_frame(memdc);
-        BitBlt(hdc, 0, 0, width, height, memdc, 0, 0, SRCCOPY);
-        return 0;
+    case WM_TIMER: {
+        MATRIXSTATE *st = (MATRIXSTATE*)GetWindowLongPtr(w, GWLP_USERDATA);
+        if (!st) break;
 
-    case WM_DESTROY:
-        ShowCursor(TRUE);
-        if (memdc) { SelectObject(memdc, oldbmp); DeleteDC(memdc); }
-        if (bmp) DeleteObject(bmp);
-        if (bg) DeleteObject(bg);
-        if (hFont) DeleteObject(hFont);
-        if (hdc) ReleaseDC(w, hdc);
-        PostQuitMessage(0);
+        width = st->width; height = st->height;
+        memcpy(drops, st->drops, sizeof(drops));
+
+        draw_frame(st->memdc);
+        memcpy(st->drops, drops, sizeof(drops));
+
+        BitBlt(st->hdc, 0, 0, st->width, st->height, st->memdc, 0, 0, SRCCOPY);
         return 0;
+    }
 
     case WM_MOUSEMOVE: {
-        int x = LOWORD(lp);
-        int y = HIWORD(lp);
-
+        int x = LOWORD(lp), y = HIWORD(lp);
         if (lastMouseX == -1 && lastMouseY == -1) {
-            lastMouseX = x;
-            lastMouseY = y;
+            lastMouseX = x; lastMouseY = y;
         } else if (abs(x - lastMouseX) > 3 || abs(y - lastMouseY) > 3) {
             PostMessage(w, WM_CLOSE, 0, 0);
         }
+        return 0;
+    }
+
+    case WM_DESTROY: {
+        MATRIXSTATE *st = (MATRIXSTATE*)GetWindowLongPtr(w, GWLP_USERDATA);
+        if (st) {
+            if (st->memdc) { SelectObject(st->memdc, st->oldbmp); DeleteDC(st->memdc); }
+            if (st->bmp) DeleteObject(st->bmp);
+            if (st->hFont) DeleteObject(st->hFont);
+            if (st->hdc) ReleaseDC(w, st->hdc);
+            free(st);
+        }
+        ShowCursor(TRUE);
+        PostQuitMessage(0);
         return 0;
     }
 
@@ -183,11 +198,13 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         PostMessage(w, WM_CLOSE, 0, 0);
         return 0;
     }
+
     return DefWindowProc(w, msg, wp, lp);
 }
 
-int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show) {
-    srand((unsigned)time(NULL));
+// Create one fullscreen Matrix window per monitor
+BOOL CALLBACK MonitorEnumProc(HMONITOR hMon, HDC hdcMon, LPRECT rcMon, LPARAM lp) {
+    HINSTANCE h = (HINSTANCE)lp;
     WNDCLASS wc = { 0 };
     wc.hInstance = h;
     wc.lpfnWndProc = WndProc;
@@ -196,13 +213,20 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show) {
 
     HWND w = CreateWindowEx(
         0, wc.lpszClassName, "Matrix", WS_POPUP,
-        0, 0,
-        GetSystemMetrics(SM_CXSCREEN),
-        GetSystemMetrics(SM_CYSCREEN),
+        rcMon->left, rcMon->top,
+        rcMon->right - rcMon->left,
+        rcMon->bottom - rcMon->top,
         NULL, NULL, h, NULL
     );
+
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
+    return TRUE;
+}
+
+int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show) {
+    srand((unsigned)time(NULL));
+    EnumDisplayMonitors(NULL, NULL, MonitorEnumProc, (LPARAM)h);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
